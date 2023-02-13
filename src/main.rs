@@ -341,7 +341,7 @@ fn main() {
             }
             _ => match capacity {
                 0..=20 => theme.low_bat,
-                90..=100 => theme.full,
+                // 90..=100 => theme.full,
                 _ => theme.normal,
             },
         };
