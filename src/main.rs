@@ -1,14 +1,17 @@
-use std::thread;
-use std::fs::{self, OpenOptions};
-use std::time::{Instant, Duration};
-use std::arch::asm;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use std::ops::DerefMut;
-use std::net::{TcpStream, TcpListener};
-use std::io::{BufRead, BufReader};
-use memmap::{MmapMut, MmapOptions};
 use libc::iopl;
+use memmap::{MmapMut, MmapOptions};
 use once_cell::sync::Lazy;
+use std::arch::asm;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader};
+use std::net::{TcpListener, TcpStream};
+use std::ops::DerefMut;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Copy, Clone, PartialEq)]
 enum Joystick {
@@ -29,7 +32,7 @@ fn set_all_pixels(color: (u8, u8, u8)) {
     set_pixel(Joystick::Left, LedPosition::Bottom, color);
     set_pixel(Joystick::Left, LedPosition::Left, color);
     set_pixel(Joystick::Left, LedPosition::Top, color);
-    
+
     set_pixel(Joystick::Right, LedPosition::Right, color);
     set_pixel(Joystick::Right, LedPosition::Bottom, color);
     set_pixel(Joystick::Right, LedPosition::Left, color);
@@ -77,19 +80,32 @@ enum EcRamAccess {
 static EC_RAM_METHOD: Lazy<Mutex<EcRamAccess>> = Lazy::new(|| {
     let vendor = fs::read_to_string("/sys/class/dmi/id/board_vendor").unwrap_or("asdf".into());
     let name = fs::read_to_string("/sys/class/dmi/id/board_name").unwrap_or("asdf".into());
-    let is_aya_air = vendor.trim() == "AYANEO" && name.trim().contains("AIR");
+    let is_aya_device = vendor.trim() == "AYANEO"
+        && (name.trim().contains("AIR")
+            || name.trim().contains("GEEK")
+            || name.trim().contains("2"));
 
-    if is_aya_air {
+    if is_aya_device {
         eprintln!("Using fast-path EC RAM RW for Aya Neo Air");
-        match OpenOptions::new().read(true).write(true).create(true).open("/dev/mem") {
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open("/dev/mem")
+        {
             Err(e) => {
                 eprintln!("Failed to open /dev/mem");
                 eprintln!("Due to: {}", e);
                 eprintln!("Falling back to I/O Port for EC RAM RW");
                 Mutex::new(EcRamAccess::IoPort)
-            },
+            }
             Ok(f) => {
-                match unsafe { MmapOptions::new().offset(AIR_EC_RAM_BASE).len(AIR_EC_RAM_SIZE).map_mut(&f) } {
+                match unsafe {
+                    MmapOptions::new()
+                        .offset(AIR_EC_RAM_BASE)
+                        .len(AIR_EC_RAM_SIZE)
+                        .map_mut(&f)
+                } {
                     Ok(map) => Mutex::new(EcRamAccess::DevMem(map)),
                     Err(e) => {
                         eprintln!("Failed to mmap /dev/mem");
@@ -111,10 +127,10 @@ fn ec_ram_write(addr: u8, data: u8) {
             send_ec_command(WR_EC);
             send_ec_data(addr);
             send_ec_data(data);
-        },
+        }
         EcRamAccess::DevMem(map) => {
             map[addr as usize] = data;
-        },
+        }
     }
 }
 
@@ -175,27 +191,25 @@ fn handle_client(stream: TcpStream, theme: Arc<Mutex<Theme>>) {
         let split = line.split(' ');
         let (mode, r, g, b) = match split.collect::<Vec<_>>().as_slice() {
             &[_mode, _r, _g, _b] => {
-                let str_to_u8 = |input: &str| {
-                    match input.parse::<u8>() {
-                        Ok(val) => val,
-                        Err(e) => {
-                            eprintln!("Failed to parse into u8");
-                            eprintln!("Due to {}", e);
-                            eprintln!("Substituting with 0");
-                            0
-                        },
+                let str_to_u8 = |input: &str| match input.parse::<u8>() {
+                    Ok(val) => val,
+                    Err(e) => {
+                        eprintln!("Failed to parse into u8");
+                        eprintln!("Due to {}", e);
+                        eprintln!("Substituting with 0");
+                        0
                     }
                 };
                 let r = str_to_u8(_r);
                 let g = str_to_u8(_g);
                 let b = str_to_u8(_b);
                 (_mode, r, g, b)
-            },
+            }
             err => {
                 eprintln!("Invalid format for changing theme");
                 eprintln!("Got: {:?}", err);
                 continue;
-            },
+            }
         };
 
         let mut t = theme.lock().unwrap();
@@ -204,16 +218,18 @@ fn handle_client(stream: TcpStream, theme: Arc<Mutex<Theme>>) {
             "low_bat" => t.low_bat = (r, g, b),
             "full" => t.full = (r, g, b),
             "normal" => t.normal = (r, g, b),
-            other => eprintln!("Expected one of: charging, low_bat, full, normal, got: {}", other),
+            other => eprintln!(
+                "Expected one of: charging, low_bat, full, normal, got: {}",
+                other
+            ),
         };
         drop(t);
     }
-
 }
 
 fn tcp_thread(theme: Arc<Mutex<Theme>>) {
-    let listener = TcpListener::bind("127.0.0.1:21370")
-        .expect("Failed to listen on 127.0.0.1:21370");
+    let listener =
+        TcpListener::bind("127.0.0.1:21370").expect("Failed to listen on 127.0.0.1:21370");
     for stream in listener.incoming() {
         if let Ok(s) = stream {
             let clients_theme = Arc::clone(&theme);
@@ -235,14 +251,22 @@ fn suspend_watcher() {
 }
 
 fn get_brightness_normalized() -> Option<f32> {
-    let backlight_dir = fs::read_dir("/sys/class/backlight").ok()?
+    let backlight_dir = fs::read_dir("/sys/class/backlight")
+        .ok()?
         .flatten()
         .map(|entry| entry.path())
         .next()?;
 
-    let brightness_file = { let mut tmp = backlight_dir.clone(); tmp.push("brightness"); tmp };
-    let max_brightness_file = { let mut tmp = backlight_dir.clone(); tmp.push("max_brightness"); tmp };
-
+    let brightness_file = {
+        let mut tmp = backlight_dir.clone();
+        tmp.push("brightness");
+        tmp
+    };
+    let max_brightness_file = {
+        let mut tmp = backlight_dir.clone();
+        tmp.push("max_brightness");
+        tmp
+    };
 
     let brightness = fs::read_to_string(&brightness_file)
         .expect("Failed to read backlight brightness")
@@ -269,7 +293,8 @@ fn main() {
     ec_cmd(0x03, 0x02, 0xc0);
 
     // find battery
-    let battery_dir = fs::read_dir("/sys/class/power_supply").expect("Failed to open /sys/class/power_supply")
+    let battery_dir = fs::read_dir("/sys/class/power_supply")
+        .expect("Failed to open /sys/class/power_supply")
         .flatten()
         .find(|ps| {
             let mut path = ps.path();
@@ -279,8 +304,16 @@ fn main() {
         .map(|dir| dir.path())
         .expect("Failed to find battery");
 
-    let battery_cap_path = { let mut tmp = battery_dir.clone(); tmp.push("capacity"); tmp };
-    let battery_status_path = { let mut tmp = battery_dir.clone(); tmp.push("status"); tmp };
+    let battery_cap_path = {
+        let mut tmp = battery_dir.clone();
+        tmp.push("capacity");
+        tmp
+    };
+    let battery_status_path = {
+        let mut tmp = battery_dir.clone();
+        tmp.push("status");
+        tmp
+    };
 
     let theme_mutex = Arc::new(Mutex::new(Theme::default()));
     let theme_mutex_2 = Arc::clone(&theme_mutex);
@@ -290,15 +323,22 @@ fn main() {
     println!("Found battery at {:?}", &battery_dir);
     let mut old = (0, 0, 0);
     loop {
-        let capacity = fs::read_to_string(&battery_cap_path).expect("Failed to read battery capacity").trim().parse::<u8>().unwrap_or(0);
-        let status = fs::read_to_string(&battery_status_path).expect("Failed to read battery status");
+        let capacity = fs::read_to_string(&battery_cap_path)
+            .expect("Failed to read battery capacity")
+            .trim()
+            .parse::<u8>()
+            .unwrap_or(0);
+        let status =
+            fs::read_to_string(&battery_status_path).expect("Failed to read battery status");
         let theme = theme_mutex.lock().unwrap();
         let color = match status.trim() {
-            "Charging" => if capacity < 90 {
-                theme.charging
-            } else {
-                theme.full
-            },
+            "Charging" => {
+                if capacity < 90 {
+                    theme.charging
+                } else {
+                    theme.full
+                }
+            }
             _ => match capacity {
                 0..=20 => theme.low_bat,
                 90..=100 => theme.full,
@@ -308,7 +348,11 @@ fn main() {
         drop(theme);
 
         let scale = get_brightness_normalized().unwrap_or(1.0);
-        let tmp = (color.0 as f32 * scale, color.1 as f32 * scale, color.2 as f32 * scale);
+        let tmp = (
+            color.0 as f32 * scale,
+            color.1 as f32 * scale,
+            color.2 as f32 * scale,
+        );
         let adjusted_color = (tmp.0 as u8, tmp.1 as u8, tmp.2 as u8);
         let force_set = JUST_RESUMED.swap(false, Ordering::SeqCst);
 
